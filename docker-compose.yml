@@ -1,0 +1,49 @@
+services:
+    spark-master:
+        image: apache/spark:3.5.1
+        command:
+            [
+                "/opt/spark/bin/spark-class",
+                "org.apache.spark.deploy.master.Master",
+            ]
+        volumes:
+            - ./data:/workspace/data
+        environment:
+            - SPARK_MASTER_HOST=spark-master
+            - SPARK_MASTER_PORT=7077
+            - SPARK_MASTER_WEBUI_PORT=8080
+        ports:
+            - "7077:7077"
+            - "8080:8080"
+
+    spark-worker:
+        image: apache/spark:3.5.1
+        depends_on:
+            - spark-master
+        command:
+            [
+                "/opt/spark/bin/spark-class",
+                "org.apache.spark.deploy.worker.Worker",
+                "spark://spark-master:7077",
+            ]
+        volumes:
+            - ./data:/workspace/data
+        environment:
+            - SPARK_WORKER_MEMORY=4G
+            - SPARK_WORKER_CORES=2
+            - SPARK_WORKER_WEBUI_PORT=8081
+        ports:
+            - "8081:8081"
+
+    app:
+        build: .
+        depends_on:
+            - spark-master
+        environment:
+            - SPARK_MASTER_URL=spark://spark-master:7077
+            - PYTHONPATH=/workspace
+        volumes:
+            - ./:/workspace
+            - ./data:/workspace/data
+        working_dir: /workspace
+        command: ["bash", "-lc", "sleep infinity"]
