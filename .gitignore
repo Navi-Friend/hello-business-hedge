@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/rl_model.zip
+data/rl_test_nav.csv
+data/best_params.yaml
+data/tuning_results.csv
+data/rule_tuning_results.csv

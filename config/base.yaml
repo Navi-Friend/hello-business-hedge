@@ -143,30 +143,34 @@ features:
 
 clustering:
     mode: "distance_optics"
-    distance_method: "pc_distance"
+    distance_method: "pca_distance"
     formation_months: 36
     pca_components_distance: 5
     optics_min_samples: 2
-    optics_xi: 0.05
+    optics_xi: 0.1
     optics_min_cluster_size: 2
     dispersion_threshold: 0.02
     distance_metric: "euclidean"
 
 pairs:
+    selection_method: "cluster_all"
+    signal_direction: "adaptive"
     max_pairs_per_cluster: 3
-    hedge_lookback: 60
-    zscore_lookback: 60
-    entry_z: 1.8
-    exit_z: 0.4
+    max_portfolio_pairs: 25
+    min_formation_score: 1.7
+    hedge_lookback: 120
+    zscore_lookback: 120
+    entry_z: 2.0
+    exit_z: 0.5
 
 rl:
     enabled: true
-    algo: "A2C"
-    total_timesteps: 50000
+    algo: "PPO"
+    total_timesteps: 30000
     transaction_cost_bps: 2
-    turnover_penalty: 0.001
-    drawdown_penalty: 0.2
-    action_reward_weight: 0.1
+    turnover_penalty: 0.01
+    drawdown_penalty: 0.1
+    action_reward_weight: 0.01
 
 risk:
     max_leverage: 1.5

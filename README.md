@@ -1,102 +1,152 @@
-# StatArb Pipeline (Spark + OPTICS + RL)
+# StatArb Agent: OPTICS Pairs Trading + RL Sizing
 
-This project implements a minimal, library-first research pipeline for statistical arbitrage:
-cluster assets, form pairs, compute spreads and z-scores, backtest rule-based trading, and
-optionally train an RL agent to scale position sizes.
+Исследовательский торговый агент для statistical arbitrage. Сначала строится честная rule-based стратегия парного трейдинга, затем поверх нее можно обучать RL-модель для изменения размера позиции. RL не выбирает пары и не должен спасать плохой baseline.
 
-## What it does
+## Суть Стратегии
 
-1. **Data ingest** (Stooq): daily prices for tickers + market proxy series (may require `STOOQ_API_KEY`).
-2. **Feature build** (Spark): monthly momentum features (mom1..mom48) + fundamentals.
-3. **Clustering** (OPTICS):
-    - **Feature OPTICS**: cluster by fundamentals + momentum (Han et al. style).
-    - **Distance OPTICS**: cluster by distance matrix (SSD/PCA/partial correlation).
-4. **Pair selection**: inside each cluster, sort by mom1, pair top vs bottom, keep pairs
-   whose mom1 spread exceeds a cross-sectional threshold.
-5. **Spread + z-score**: OLS spread, rolling z-score, trading zones.
-6. **Backtest**: rule-based open/close logic with transaction costs.
-7. **RL sizing** (optional): continuous action in [-1, 1], shaped reward, position scaling.
+Логика взята из исследований по clustering-based pairs trading:
 
-## Modes (clustering)
+- rolling-схема: 36 месяцев formation window -> 1 месяц trading;
+- кластеризация акций через OPTICS;
+- выбор пар только из одного кластера;
+- расчет hedge ratio, z-score и направления сделки только на прошлом formation window;
+- торговля следующего месяца без доступа к будущим данным;
+- RL используется только как sizing-layer после rule-based сигналов.
 
-Set in `config/base.yaml`:
+Текущий baseline:
 
-### 1) distance_optics
+```text
+distance_method: pca_distance
+signal_direction: adaptive
+max_portfolio_pairs: 25
+min_formation_score: 1.7
+entry_z / exit_z: 2.0 / 0.5
+```
 
-Uses OPTICS on a distance matrix computed over a rolling formation window.
-`distance_method` options:
+`min_formation_score` означает: пара допускается к торговле в следующем месяце только если на предыдущем 36-месячном окне ее rule-based сигнал был достаточно сильным.
 
-- `pc_distance` (partial correlation vs market index, Kenett style)
-- `pca_distance` (PCA of returns, Sarmento & Horta style)
-- `ssd_distance` (normalized price SSD, Gatev style)
+## Текущий Результат
 
-Key controls:
+Последняя честная проверка через Docker:
 
-- `formation_months`: rolling formation window length (e.g., 36 months)
-- `pca_components_distance`: PCA components used for PCA distance
-- `optics_min_samples`, `optics_xi`, `optics_min_cluster_size`
+```text
+Rule-based Sharpe: 1.48
+Final NAV: 1.3758
+Total Return: 37.58%
+Annual Return: 14.62%
+Max Drawdown: 10.41%
+Profit Factor: 1.58
+Trading Days: 569
+Coverage: 27 торговых месяцев, в среднем 1.5 пары
+```
 
-### 2) feature_optics
+Train/test:
 
-Clusters directly on monthly features (momentum + fundamentals).
-Uses PCA (variance threshold) and standardization before OPTICS.
+```text
+Train Sharpe: 1.83
+Test Sharpe: 0.37
+Full Sharpe: 1.48
+```
 
-## Configuration highlights
 
-`config/base.yaml`:
+## Архитектура
 
-- **data**: tickers, date range, `prices_path`, `fundamentals_path`, `market_path`, `market_ticker`
-- **features**: `momentum_windows` (1..48), `pca_components` (e.g., 0.99 variance)
-- **pairs**: `entry_z`, `exit_z`, `hedge_lookback`, `zscore_lookback`
-- **rl**: `algo` (A2C/PPO), `transaction_cost_bps`, `action_reward_weight`
+```text
+config/base.yaml          основные параметры
+run_rl.py                 главный запуск в Docker
+src/data/                 загрузка и кеширование данных Stooq
+src/clustering/           OPTICS и distance matrices
+src/pairs/                выбор пар внутри кластеров
+src/backtest/             rolling backtest и signal dataset
+src/rl/                   Gym env и обучение Stable-Baselines3
+src/pipeline/run.py       orchestration end-to-end
+scripts/evaluate_backtest.py  отчет по метрикам
+scripts/diagnose.py           sanity-check данных
+```
 
-## How to run
+Данные и результаты лежат в `data/`.
+
+## Как Запускать
+
+Запустить контейнеры:
 
 ```bash
-# Build and start
 docker compose up -d --build
-
-# Execute pipeline inside container (Spark cluster is already running)
-docker compose exec app python -m src.pipeline.run
-
-# Check logs
-docker compose logs app
 ```
 
-### Quick tests
+Проверить rule-based стратегию без RL:
 
 ```bash
-# Test all modules without full pipeline
-python test_local.py
-
-# Test specific module
-python -c "from src.clustering.distance_optics import DistanceOPTICS; print('✓ OPTICS imported')"
+docker compose exec -e VERIFY_ONLY=1 app python run_rl.py
 ```
 
-## Outputs
+Посмотреть результат:
 
-Generated in `data/`:
+```bash
+docker compose exec app python scripts/evaluate_backtest.py
+docker compose exec app python scripts/diagnose.py
+```
 
-- `pairs.csv`: selected pairs per month (columns: ticker1, ticker2, cluster_id, mom1_spread, zscore, signal)
-- `rule_backtest.csv`: rule-based NAV, equity, signals, transaction costs
-- `rl_model.zip`: trained RL agent (if enabled in config)
-- `clustering_debug.csv`: cluster purity, size per month
+Проверить синтаксис:
 
-## How to verify the result
+```bash
+docker compose exec app python -m compileall -q src scripts
+```
 
-After running the pipeline, check these files in `data/`:
+## Как Переобучить Модель
 
-- `pairs.csv` and `rule_backtest.csv` mean the pipeline found pairs and completed the rule-based backtest.
-- `rl_model.zip` appears only when `rl.enabled: true` and at least one pair was found.
-- `pipeline.log` captures the full Spark run, and `pipeline.exit` contains the final exit code from the last captured run.
+Полный запуск с RL:
 
-If the command exits `0` but `pairs.csv` is missing, the pipeline stopped early because pair selection returned no eligible pairs for that run.
+```bash
+docker compose exec app python run_rl.py
+```
 
-## Notes
+Что произойдет:
 
-- Data is fetched from Stooq (daily data). If Stooq returns “Get your apikey”, set `STOOQ_API_KEY` via env.
-- If your network returns HTML instead of CSV, set `STOOQ_BASE_URLS=https://stooq.pl`.
-- The distance-based mode needs the market index series (`market_path`).
-- RL agent is a sizing layer on top of pairs; it does not generate signals directly.
-- PySpark connects to the Apache Spark master via `SPARK_MASTER_URL` (spark://spark-master:7077).
-- Transaction costs are hardcoded at `cost_bps` in config; adjust for your broker's fees.
+1. Пайплайн заново построит features, clusters, pairs и rule-based backtest.
+2. Если rule-based Sharpe отрицательный, RL не обучается.
+3. Если baseline положительный, обучается RL на rolling pair episodes.
+4. `data/rl_test_nav.csv` сохраняется для диагностики.
+5. `data/rl_model.zip` сохраняется только если RL Sharpe на OOS лучше rule-based Sharpe на том же периоде.
+
+Если `data/rl_model.zip` отсутствует после запуска, это нормально: значит RL не улучшил baseline и модель была отброшена.
+
+## Сильные Стороны
+
+- Нет торговли вне своего out-of-sample месяца.
+- Formation/trading схема близка к исследованиям.
+- Исправлен look-ahead в pair selection.
+- Хороший full Sharpe достигается rule-based слоем, без необходимости RL.
+- Есть защитный gate: слабый baseline не передается в RL как будто это рабочая стратегия.
+
+## Слабые Стороны
+
+- Высокий Sharpe достигнут строгим фильтром `min_formation_score`, поэтому coverage низкий.
+- Стратегия торгует мало месяцев и мало пар, диверсификация ограничена.
+- Test Sharpe заметно ниже train Sharpe, значит есть риск переобучения фильтра.
+- RL пока не доказал улучшение baseline.
+- Результаты чувствительны к universe, источнику данных, комиссиям и режиму рынка.
+
+## Рыночный Режим
+
+Стратегия лучше подходит для режимов, где:
+
+- связи внутри секторов и кластеров устойчивы;
+- spread между похожими бумагами возвращается к норме;
+- нет длительного однонаправленного разрыва между акциями пары;
+- волатильность достаточная для входов, но без частых структурных сломов.
+
+Стратегия хуже работает, когда:
+
+- рынок резко меняет лидеров;
+- отдельные акции уходят в длительный тренд относительно кластера;
+- корреляции ломаются;
+- formation window хорошо выглядел в прошлом, но связь пары исчезла в следующем месяце.
+
+## Основные Артефакты
+
+- `data/pairs.csv`: выбранные пары по месяцам.
+- `data/rule_backtest.csv`: rule-based NAV, PnL, turnover, число пар.
+- `data/rl_test_nav.csv`: OOS NAV RL, если запускался full pipeline.
+- `data/rl_model.zip`: сохраненная RL-модель, только если она обошла rule-based OOS.
+

@@ -37,7 +37,11 @@ class ClusteringConfig:
 
 @dataclass
 class PairsConfig:
+    selection_method: str
+    signal_direction: str
     max_pairs_per_cluster: int
+    max_portfolio_pairs: int
+    min_formation_score: float
     hedge_lookback: int
     zscore_lookback: int
     entry_z: float
@@ -110,7 +114,11 @@ def load_config(path: str) -> Config:
             distance_metric=str(clustering["distance_metric"]),
         ),
         pairs=PairsConfig(
+            selection_method=str(pairs.get("selection_method", "cluster_all")),
+            signal_direction=str(pairs.get("signal_direction", "mean_reversion")),
             max_pairs_per_cluster=int(pairs["max_pairs_per_cluster"]),
+            max_portfolio_pairs=int(pairs.get("max_portfolio_pairs", 20)),
+            min_formation_score=float(pairs.get("min_formation_score", -1e9)),
             hedge_lookback=int(pairs["hedge_lookback"]),
             zscore_lookback=int(pairs["zscore_lookback"]),
             entry_z=float(pairs["entry_z"]),

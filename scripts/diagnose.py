@@ -25,9 +25,12 @@ if backtest_file.exists():
     print(f"     Max: {df['pnl'].max():.6f}")
     print(f"     Mean: {df['pnl'].mean():.6f}")
     print(f"     Std: {df['pnl'].std():.6f}")
-    print(f"\n   ZScore stats:")
-    print(f"     Min: {df['zscore'].min():.6f}")
-    print(f"     Max: {df['zscore'].max():.6f}")
+    if 'zscore' in df.columns:
+        print(f"\n   ZScore stats:")
+        print(f"     Min: {df['zscore'].min():.6f}")
+        print(f"     Max: {df['zscore'].max():.6f}")
+    else:
+        print("\n   ZScore stats: not stored in portfolio-level backtest")
     print(f"\n   First 5 rows:")
     print(df.head())
     print(f"\n   Last 5 rows:")

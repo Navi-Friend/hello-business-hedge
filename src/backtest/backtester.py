@@ -112,9 +112,9 @@ def simulate_rule_based(data: pd.DataFrame, config: BacktestConfig) -> pd.DataFr
         
         # Determine target position
         if zscore > config.entry_z:
-            target = -1.0
-        elif zscore < -config.entry_z:
             target = 1.0
+        elif zscore < -config.entry_z:
+            target = -1.0
         elif abs(zscore) < config.exit_z:
             target = 0.0
         else:

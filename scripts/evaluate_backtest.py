@@ -4,10 +4,10 @@ Comprehensive backtest evaluation script.
 Computes performance metrics for both rule-based and RL strategies.
 
 Usage:
-  python evaluate_backtest.py
+  python scripts/evaluate_backtest.py
   
 Or in Docker:
-  docker compose exec app python evaluate_backtest.py
+  docker compose exec app python scripts/evaluate_backtest.py
 """
 
 import sys
@@ -24,19 +24,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def compute_metrics(nav_values: np.ndarray, returns: np.ndarray = None, num_pairs: int = 1) -> dict:
+def compute_metrics(nav_values: np.ndarray, returns: np.ndarray = None) -> dict:
     """
     Compute comprehensive performance metrics.
     
     Args:
         nav_values: Array of portfolio NAV values
         returns: Daily returns (auto-computed if not provided)
-        num_pairs: Number of pairs in portfolio (for info)
-    
     Returns:
         Dictionary with metrics
     """
@@ -149,9 +148,18 @@ def evaluate_rule_backtest() -> dict:
     try:
         df = pd.read_csv(backtest_file)
         nav = df['nav'].values
-        num_pairs = int(df['num_pairs'].iloc[0]) if 'num_pairs' in df.columns else 1
-        metrics = compute_metrics(nav, num_pairs=num_pairs)
-        print_metrics_table(f"RULE-BASED BACKTEST (Portfolio: {num_pairs} pairs)", metrics)
+        metrics = compute_metrics(nav)
+        if "selected_pairs" in df.columns:
+            avg_pairs = float(df["selected_pairs"].mean())
+            max_pairs = int(df["selected_pairs"].max())
+            title = f"RULE-BASED BACKTEST (avg {avg_pairs:.1f}, max {max_pairs} pairs)"
+        elif "num_pairs" in df.columns:
+            avg_pairs = float(df["num_pairs"].mean())
+            max_pairs = int(df["num_pairs"].max())
+            title = f"RULE-BASED BACKTEST (avg {avg_pairs:.1f}, max {max_pairs} pairs)"
+        else:
+            title = "RULE-BASED BACKTEST"
+        print_metrics_table(title, metrics)
         return metrics
     except Exception as e:
         logger.error(f"Failed to evaluate rule backtest: {e}")
@@ -161,92 +169,25 @@ def evaluate_rule_backtest() -> dict:
 def evaluate_rl_model() -> dict:
     """Evaluate RL model performance."""
     logger.info("Loading RL model and evaluating...")
-    
-    model_path = Path("data/rl_model")
-    model_zip = Path("data/rl_model.zip")
-    if model_zip.exists():
-        model_file = model_zip
-    elif model_path.exists():
-        # Check if it's a directory (old format) or a file
-        if model_path.is_dir():
-            zip_files = list(model_path.glob("*.zip"))
-            if zip_files:
-                model_file = zip_files[0]
-            else:
-                logger.warning(f"No model file found in {model_path}")
-                return {}
-        else:
-            model_file = model_path
-    else:
-        logger.warning(f"RL model not found: {model_path}")
-        return {}
-    
-    try:
-        from stable_baselines3 import A2C
-        from src.rl.env import EnvConfig, PairTradingEnv
-        from src.backtest.backtester import build_pair_signal
-        
-        # Load config
-        with open("config/base.yaml", "r") as f:
-            cfg = yaml.safe_load(f)
-        
-        # Load data
-        prices = pd.read_parquet("data/prices.parquet")[['date', 'ticker', 'close']]
-        pairs = pd.read_csv("data/pairs.csv")
-        
-        if pairs.empty:
-            logger.warning("No pairs found in data/pairs.csv")
+
+    rl_nav_file = Path("data/rl_test_nav.csv")
+    if rl_nav_file.exists():
+        try:
+            rl_nav = pd.read_csv(rl_nav_file)
+            if "nav" in rl_nav.columns and len(rl_nav) > 2:
+                metrics = compute_metrics(rl_nav["nav"].to_numpy())
+                print_metrics_table("RL-OPTIMIZED MODEL (out-of-sample)", metrics)
+                return metrics
+            logger.warning("RL out-of-sample file is empty; model evaluation skipped")
             return {}
-        
-        # Get first pair
-        pair = pairs.iloc[0]
-        logger.info(f"Evaluating RL on pair: {pair['long_ticker']} vs {pair['short_ticker']}")
-        
-        # Build signals
-        signal = build_pair_signal(
-            prices,
-            long_ticker=pair['long_ticker'],
-            short_ticker=pair['short_ticker'],
-            hedge_lookback=cfg['pairs']['hedge_lookback'],
-            zscore_lookback=cfg['pairs']['zscore_lookback'],
-            entry_z=cfg['pairs']['entry_z'],
-            exit_z=cfg['pairs']['exit_z'],
-        )
-        
-        # Create environment
-        env_config = EnvConfig(
-            transaction_cost_bps=cfg['rl']['transaction_cost_bps'],
-            turnover_penalty=cfg['rl']['turnover_penalty'],
-            drawdown_penalty=cfg['rl']['drawdown_penalty'],
-            action_reward_weight=cfg['rl']['action_reward_weight'],
-        )
-        env = PairTradingEnv(signal, env_config)
-        
-        # Load and run model
-        model = A2C.load(str(model_file))
-        obs, _ = env.reset()
-        
-        nav_values = [1.0]
-        for _ in range(len(signal) - 1):
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            nav_values.append(info['nav'])
-            
-            if terminated or truncated:
-                break
-        
-        # Compute metrics
-        nav_array = np.array(nav_values)
-        metrics = compute_metrics(nav_array)
-        print_metrics_table("RL-OPTIMIZED MODEL (A2C)", metrics)
-        
-        return metrics
-        
-    except Exception as e:
-        logger.error(f"Failed to evaluate RL model: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {}
+        except Exception as e:
+            logger.warning(f"Could not read RL out-of-sample file: {e}")
+    
+    logger.warning(
+        "No RL out-of-sample NAV available. Run `docker compose exec app python run_rl.py` "
+        "to train/evaluate RL, or use VERIFY_ONLY for rule-based checks."
+    )
+    return {}
 
 
 def compare_strategies(rule_metrics: dict, rl_metrics: dict) -> None:

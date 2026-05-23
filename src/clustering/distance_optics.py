@@ -81,6 +81,7 @@ def run_optics_distance_by_month(
 
     months = sorted(returns.index.to_period("M").unique())
     outputs: List[pd.DataFrame] = []
+    min_formation_rows = int(252 * config.formation_months / 12 * 0.8)
 
     for month in months:
         month_start = month.to_timestamp()
@@ -89,7 +90,7 @@ def run_optics_distance_by_month(
         window_returns = returns.loc[
             (returns.index >= formation_start) & (returns.index <= formation_end)
         ].dropna(axis=1, how="any")
-        if len(window_returns) < 60:
+        if len(window_returns) < min_formation_rows:
             continue
 
         if config.method == "pc_distance":

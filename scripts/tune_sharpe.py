@@ -3,10 +3,10 @@
 Auto-tune pipeline parameters until RL Sharpe reaches target.
 
 Usage:
-  python tune_sharpe.py --target 1.0 --max-runs 12 --timesteps 10000
+  python scripts/tune_sharpe.py --target 1.0 --max-runs 12 --timesteps 10000
 
 Docker:
-  docker compose exec -e LOG_LEVEL=INFO -e STOOQ_API_KEY=... app python tune_sharpe.py --target 1.0
+  docker compose exec -e LOG_LEVEL=INFO -e STOOQ_API_KEY=... app python scripts/tune_sharpe.py --target 1.0
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import logging
 import random
+import shutil
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -21,13 +23,22 @@ import numpy as np
 import pandas as pd
 import yaml
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.config import load_config
 from src.pipeline.run import run_pipeline
-from src.backtest.backtester import build_pair_signal
-from src.rl.env import EnvConfig, PairTradingEnv
 
 
 logger = logging.getLogger(__name__)
+
+
+BEST_ARTIFACTS = [
+    ("data/rl_model.zip", "data/best_rl_model.zip"),
+    ("data/rl_test_nav.csv", "data/best_rl_test_nav.csv"),
+    ("data/rule_backtest.csv", "data/best_rule_backtest.csv"),
+    ("data/pairs.csv", "data/best_pairs.csv"),
+]
 
 
 def compute_sharpe(nav_values: np.ndarray) -> float:
@@ -41,54 +52,25 @@ def compute_sharpe(nav_values: np.ndarray) -> float:
 
 
 def evaluate_rl_sharpe(cfg) -> float:
-    model_zip = Path("data/rl_model.zip")
-    if not model_zip.exists():
-        logger.warning("RL model not found: %s", model_zip)
-        return 0.0
+    rl_nav_path = Path("data/rl_test_nav.csv")
+    if rl_nav_path.exists():
+        rl_nav = pd.read_csv(rl_nav_path)
+        if "nav" in rl_nav.columns and len(rl_nav) > 2:
+            return compute_sharpe(rl_nav["nav"].to_numpy(dtype=float))
 
-    from stable_baselines3 import A2C, PPO
+    rule_path = Path("data/rule_backtest.csv")
+    if rule_path.exists():
+        rule_nav = pd.read_csv(rule_path)
+        if "nav" in rule_nav.columns and len(rule_nav) > 2:
+            sharpe = compute_sharpe(rule_nav["nav"].to_numpy(dtype=float))
+            logger.warning(
+                "RL out-of-sample NAV unavailable; returning rule-based Sharpe %.3f",
+                sharpe,
+            )
+            return sharpe
 
-    prices = pd.read_parquet("data/prices.parquet")[["date", "ticker", "close"]]
-    pairs = pd.read_csv("data/pairs.csv")
-    if pairs.empty:
-        logger.warning("pairs.csv is empty")
-        return 0.0
-
-    pair = pairs.iloc[0]
-    signal = build_pair_signal(
-        prices,
-        long_ticker=pair["long_ticker"],
-        short_ticker=pair["short_ticker"],
-        hedge_lookback=cfg.pairs.hedge_lookback,
-        zscore_lookback=cfg.pairs.zscore_lookback,
-        entry_z=cfg.pairs.entry_z,
-        exit_z=cfg.pairs.exit_z,
-    )
-
-    env_config = EnvConfig(
-        transaction_cost_bps=cfg.rl.transaction_cost_bps,
-        turnover_penalty=cfg.rl.turnover_penalty,
-        drawdown_penalty=cfg.rl.drawdown_penalty,
-        action_reward_weight=cfg.rl.action_reward_weight,
-    )
-    env = PairTradingEnv(signal, env_config)
-
-    algo = cfg.rl.algo.upper()
-    if algo == "PPO":
-        model = PPO.load(str(model_zip))
-    else:
-        model = A2C.load(str(model_zip))
-
-    obs, _ = env.reset()
-    nav_values = [1.0]
-    for _ in range(len(signal) - 1):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, truncated, info = env.step(action)
-        nav_values.append(info["nav"])
-        if terminated or truncated:
-            break
-
-    return compute_sharpe(np.array(nav_values))
+    logger.warning("No out-of-sample NAV available for evaluation")
+    return -999.0
 
 
 def build_search_space() -> List[Dict[str, object]]:
@@ -99,7 +81,7 @@ def build_search_space() -> List[Dict[str, object]]:
     lookbacks = [(60, 60), (90, 90), (120, 120)]
     turnover_penalty = [0.001, 0.005, 0.01]
     drawdown_penalty = [0.1, 0.2, 0.3]
-    action_reward_weight = [0.05, 0.1, 0.2]
+    action_reward_weight = [0.0, 0.005, 0.01]
     algos = ["A2C", "PPO"]
 
     grid = []
@@ -147,6 +129,21 @@ def apply_params(cfg, params: Dict[str, object], timesteps: int) -> None:
     cfg.rl.enabled = True
 
 
+def snapshot_best_artifacts() -> None:
+    for src, dst in BEST_ARTIFACTS:
+        src_path = Path(src)
+        if src_path.exists():
+            shutil.copy2(src_path, dst)
+
+
+def restore_best_artifacts() -> None:
+    for dst, src in BEST_ARTIFACTS:
+        src_path = Path(src)
+        if src_path.exists():
+            shutil.copy2(src_path, dst)
+            src_path.unlink()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", type=float, default=1.0, help="Sharpe target to stop")
@@ -165,6 +162,7 @@ def main() -> None:
     results: List[Dict[str, object]] = []
     search_space = build_search_space()
     max_runs = min(args.max_runs, len(search_space))
+    best_sharpe = -float("inf")
 
     logger.info("Starting auto-tune: target=%.2f, max_runs=%d, timesteps=%d", args.target, max_runs, args.timesteps)
 
@@ -184,6 +182,11 @@ def main() -> None:
         row["timesteps"] = args.timesteps
         results.append(row)
 
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            snapshot_best_artifacts()
+            logger.info("New best Sharpe %.3f; saved artifact snapshot", sharpe)
+
         if sharpe >= args.target:
             logger.info("Target reached: Sharpe=%.3f >= %.2f", sharpe, args.target)
             break
@@ -195,6 +198,7 @@ def main() -> None:
     logger.info("Saved results to %s", out_path.resolve())
 
     if not results_df.empty:
+        restore_best_artifacts()
         best = results_df.iloc[0].to_dict()
         best_path = Path("data/best_params.yaml")
         with open(best_path, "w", encoding="utf-8") as handle:
